@@ -1,168 +1,171 @@
 import streamlit as st
 import cv2
 import numpy as np
-import os
 import pandas as pd
 from datetime import datetime
-import glob
+import os
 
-# Nastavení vzhledu stránky
-st.set_page_config(page_title="Kontrola Kvality - Zabezpečeno", layout="centered")
+# --- NASTAVENÍ STRÁNKY A ZABEZPEČENÍ ---
+st.set_page_config(page_title="Kontrola Kvality Krabic", layout="centered")
 
-# --- FUNKCE PRO PŘIHLÁŠENÍ ---
-def prihlaseni():
-    st.subheader("🔒 Přihlášení do systému kontroly kvality")
-    uzivatel = st.text_input("Uživatelské jméno:")
+# Inicializace přihlášení, pokud neexistuje
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+
+# --- PŘIHLAŠOVACÍ OBRAZOVKA ---
+if not st.session_state.logged_in:
+    st.title("🔒 Vstup do systému")
+    
+    jmeno = st.text_input("Uživatelské jméno (např. admin):")
     heslo = st.text_input("Heslo:", type="password")
     
-    # Údaje pro přihlášení
-    SPRÁVNÉ_JMÉNO = "admin"
-    SPRÁVNÉ_HESLO = "kvalita2026"
-    
     if st.button("Přihlásit se"):
-        if uzivatel == SPRÁVNÉ_JMÉNO and heslo == SPRÁVNÉ_HESLO:
-            st.session_state.prihlasen = True
+        # BEZPEČNÁ KONTROLA HESLA PŘES TREZOR CLOUDU
+        if jmeno == "admin" and heslo == st.secrets["credentials"]["password"]:
+            st.session_state.logged_in = True
             st.success("Přihlášení úspěšné!")
             st.rerun()
         else:
-            st.error("Nesprávné uživatelské jméno nebo heslo!")
+            st.error("Nesprávné jméno nebo heslo!")
+    st.stop()
 
-# Inicializace stavu přihlášení
-if "prihlasen" not in st.session_state:
-    st.session_state.prihlasen = False
+# --- HLAVNÍ PROGRAM (PO PŘIHLÁŠENÍ) ---
+st.title("📦 Kontrola kvality potisku krabic")
 
-# Pokud uživatel NENÍ přihlášen, ukážeme pouze přihlašovací okno
-if not st.session_state.prihlasen:
-    prihlaseni()
-else:
-    # --- ZDE ZAČÍNÁ SAMOTNÁ APLIKACE PO PŘIHLÁŠENÍ ---
-    if st.sidebar.button("Odhlásit se 🚪"):
-        st.session_state.prihlasen = False
-        st.rerun()
+# Nastavení složek pro cloudové prostředí
+SABLO_DIR = "sablony"
+HISTORIE_FILE = "historie_skenu.csv"
+
+if not os.path.exists(SABLO_DIR):
+    os.makedirs(SABLO_DIR)
+
+# Pomocná funkce pro načtení historie
+def nacist_historii():
+    if os.path.exists(HISTORIE_FILE):
+        return pd.read_csv(HISTORIE_FILE)
+    else:
+        return pd.DataFrame(columns=["Datum a čas", "Produkt", "Výsledek", "Shoda (%)"])
+
+# --- MENU A NAVIGACE ---
+volba = st.sidebar.radio("Navigace", ["Skenování", "Historie", "Nastavení (Šablony)"])
+
+# 1. SEKCE: SKENOVÁNÍ
+if volba == "Skenování":
+    st.header("📸 Nové ověření krabice")
+    
+    # Výběr produktu podle dostupných šablon
+    sablony_soubory = [f for f in os.listdir(SABLO_DIR) if f.endswith('.png')]
+    if not sablony_soubory:
+        st.warning("V systému nejsou žádné šablony. Jděte do Nastavení a přidejte vzor.")
+    else:
+        produkty = [os.path.splitext(f)[0].replace("sablona_", "") for f in sablony_soubory]
+        vybrany_produkt = st.selectbox("Vyberte vyráběný produkt:", produkty)
         
-    st.sidebar.write("---")
-
-    CSV_FILE = "historie_skenu.csv"
-    if not os.path.exists(CSV_FILE):
-        pd.DataFrame(columns=["Čas", "Artikl", "Výsledek", "Detail"]).to_csv(CSV_FILE, index=False)
-
-    def ziskej_seznam_vzoru():
-        soubory = glob.glob("sablona_*.png")
-        vzory = [f.replace("sablona_", "").replace(".png", "") for f in soubory]
-        return vzory if vzory else ["Vzorový Box"]
-
-    # --- BOČNÍ MENU ---
-    st.sidebar.title("Navigace")
-    volba = st.sidebar.radio("Přejít na:", ["Scan Box", "History", "Analytics", "Settings"])
-
-    def zpracuj_obrazek(upload_file):
-        if upload_file is not None:
-            file_bytes = np.asarray(bytearray(upload_file.read()), dtype=np.uint8)
-            return cv2.imdecode(file_bytes, 1)
-        return None
-
-    # --- 1. SCAN BOX ---
-    if volba == "Scan Box":
-        st.header("Skenování a Kontrola Pozice")
-        dostupne_vzory = ziskej_seznam_vzoru()
-        vybrany_artikl = st.selectbox("Vyber artikl, který jdeš kontrolovat:", dostupne_vzory)
-
-        zdroj = st.radio("Vyber zdroj obrazu:", ["Nahrát soubor (Fotku)", "Použít webkameru"], horizontal=True)
-        img_file = None
+        # tolerance od uživatele
+        tolerance = st.slider("Tolerance citlivosti (pixelů):", 1, 50, 25)
         
-        if zdroj == "Nahrát soubor (Fotku)":
-            img_file = st.file_uploader("Vyber fotku krabice ke kontrole", type=["png", "jpg", "jpeg"])
-        else:
-            img_file = st.camera_input("Zóna kamery")
-
-        if img_file:
-            frame = zpracuj_obrazek(img_file)
-            if frame is not None:
-                gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                sablona_path = f'sablona_{vybrany_artikl}.png'
-                
-                if os.path.exists(sablona_path):
-                    template = cv2.imread(sablona_path, cv2.IMREAD_GRAYSCALE)
-                    w, h = template.shape[::-1]
-                    
-                    res = cv2.matchTemplate(gray_frame, template, cv2.TM_CCOEFF_NORMED)
-                    _, max_val, _, max_loc = cv2.minMaxLoc(res)
-
-                    MIN_SHODA = 0.70
-                    OČEKÁVANÉ_X, OČEKÁVANÉ_Y = gray_frame.shape[1] // 2, gray_frame.shape[0] // 2
-                    TOLERANCE = 60
-
-                    stred_x = max_loc[0] + (w // 2)
-                    stred_y = max_loc[1] + (h // 2)
-
-                    if max_val >= MIN_SHODA:
-                        rozdil_x = abs(stred_x - OČEKÁVANÉ_X)
-                        rozdil_y = abs(stred_y - OČEKÁVANÉ_Y)
-
-                        if rozdil_x <= TOLERANCE and rozdil_y <= TOLERANCE:
-                            st.success(f"### 🎉 PASS \nArtikl [{vybrany_artikl}] je v pořádku. Shoda: {max_val*100:.1f}%")
-                            novy_zaznam = [datetime.now().strftime("%Y-%m-%d %H:%M:%S"), vybrany_artikl, "PASS", "V pořádku"]
-                        else:
-                            st.error(f"### ❌ ERROR \nArtikl [{vybrany_artikl}] je posunutý! (Odchylka X: {rozdil_x}px, Y: {rozdil_y}px)")
-                            novy_zaznam = [datetime.now().strftime("%Y-%m-%d %H:%M:%S"), vybrany_artikl, "ERROR", f"Posunuto o X:{rozdil_x} Y:{rozdil_y}"]
-                    else:
-                        st.error(f"### ❌ ERROR \nArtikl [{vybrany_artikl}] nebyl nalezen nebo chybí součástky!")
-                        novy_zaznam = [datetime.now().strftime("%Y-%m-%d %H:%M:%S"), vybrany_artikl, "ERROR", "Nenalezeno"]
-                    
-                    df = pd.read_csv(CSV_FILE)
-                    df.loc[len(df)] = novy_zaznam
-                    df.to_csv(CSV_FILE, index=False)
-                else:
-                    st.warning(f"Pro artikl '{vybrany_artikl}' neexistuje soubor šablony. Vytvoř ho v Settings.")
-
-    # --- 2. HISTORY ---
-    elif volba == "History":
-        st.header("📋 Historie skenů")
-        df = pd.read_csv(CSV_FILE)
-        if not df.empty:
-            st.dataframe(df.iloc[::-1], use_container_width=True)
-        else:
-            st.info("Zatím nebyly provedeny žádné skeny.")
-
-    # --- 3. ANALYTICS ---
-    elif volba == "Analytics":
-        st.header("📊 Statistiky kontrol")
-        df = pd.read_csv(CSV_FILE)
-        if not df.empty:
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Celkem skenů", len(df))
-            col2.metric("Dobré (PASS)", len(df[df["Výsledek"] == "PASS"]))
-            col3.metric("Špatné (ERROR)", len(df[df["Výsledek"] == "ERROR"]))
-            st.subheader("Graf výsledků")
-            st.bar_chart(df["Výsledek"].value_counts())
-        else:
-            st.info("Žádná data pro analýzu.")
-
-    # --- 4. SETTINGS ---
-    elif volba == "Settings":
-        st.header("⚙️ Správa vzorů a šablon")
-        st.subheader("1. Vytvořit nebo přepsat vzor")
-        nazev_novy = st.text_input("Zadej UNIKÁTNÍ název pro tento artikl:", "Vzorový Box")
+        # Kamera na mobilu/PC
+        foto = st.camera_input("Vyfoťte hotovou krabici")
         
-        zdroj_sablony = st.radio("Vyber způsob zadání vzoru:", ["Nahrát fotku vzoru", "Vyfotit webkamerou"], horizontal=True)
-        vzor_foto = None
-        
-        if zdroj_sablony == "Nahrát fotku vzoru":
-            vzor_foto = st.file_uploader("Nahraj fotku ideálního boxu", type=["png", "jpg", "jpeg"])
-        else:
-            vzor_foto = st.camera_input("Vyfoť vzor")
+        if foto is not None:
+            # Načtení vyfoceného obrázku
+            file_bytes = np.asarray(bytearray(foto.read()), dtype=np.uint8)
+            img_sken = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
             
-        if vzor_foto:
-            img = zpracuj_obrazek(vzor_foto)
-            if img is not None:
-                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                h, w = gray.shape
-                vyrez = gray[h//2-100:h//2+100, w//2-100:w//2+100]
+            # Načtení šablony
+            img_sablona = cv2.imread(os.path.join(SABLO_DIR, f"sablona_{vybrany_produkt}.png"), cv2.IMREAD_COLOR)
+            
+            # Zajištění stejné velikosti pro porovnání
+            img_sken_res = cv2.resize(img_sken, (img_sablona.shape[1], img_sablona.shape[0]))
+            
+            # Výpočet rozdílu (porovnání pixelů)
+            rozdil = cv2.absdiff(img_sablona, img_sken_res)
+            rozdil_gray = cv2.cvtColor(rozdil, cv2.COLOR_BGR2GRAY)
+            _, thresholded = cv2.threshold(rozdil_gray, tolerance, 255, cv2.THRESH_BINARY)
+            
+            Chybne_pixely = np.sum(thresholded == 255)
+            celkem_pixelu = thresholded.size
+            shoda = ((celkem_pixelu - Chybne_pixely) / celkem_pixelu) * 100
+            
+            # Vyhodnocení (např. limit 95% pro úspěch)
+            if shoda >= 95.0:
+                vysledek = "OK (V pořádku)"
+                st.success(f"Výsledek: {vysledek} | Shoda: {shoda:.2f}%")
+            else:
+                vysledek = "ZMETEK (Chyba potisku)"
+                st.error(f"Výsledek: {vysledek} | Shoda: {shoda:.2f}%")
                 
-                bezpecny_nazev = "".join([c for c in nazev_novy if c.isalpha() or c.isdigit() or c in " _-"]).strip()
-                cv2.imwrite(f'sablona_{bezpecny_nazev}.png', vyrez)
-                st.success(f"🎉 Vzor '{bezpecny_nazev}' byl úspěšně uložen!")
-                
-        st.write("---")
-        st.subheader("2. Aktuálně uložené vzory v systému")
-        st.write(ziskej_seznam_vzoru())
+                # Ukázka chyb pro operátora
+                st.subheader("Zvýrazněné rozdíly (červená místa = chyby):")
+                rozdil_viz = img_sken_res.copy()
+                rozdil_viz[thresholded == 255] = [0, 0, 255] # červená barva
+                st.image(cv2.cvtColor(rozdil_viz, cv2.COLOR_BGR2RGB))
+            
+            # Zápis do historie
+            nova_data = pd.DataFrame({
+                "Datum a čas": [datetime.now().strftime("%d.%m.%Y %H:%M:%S")],
+                "Produkt": [vybrany_produkt],
+                "Výsledek": [vysledek],
+                "Shoda (%)": [f"{shoda:.2f}"]
+            })
+            df_historie = nacist_historii()
+            df_historie = pd.concat([nova_data, df_historie], ignore_index=True)
+            df_historie.to_csv(HISTORIE_FILE, index=False)
+
+# 2. SEKCE: HISTORIE
+elif volba == "Historie":
+    st.header("📊 Historie kontrol z dílny")
+    df_historie = nacist_historii()
+    
+    if df_historie.empty:
+        st.info("Zatím nebyly provedeny žádné kontroly.")
+    else:
+        st.dataframe(df_historie, use_container_width=True)
+        
+        # Tlačítko pro stažení Excelu/CSV tabulky
+        csv = df_historie.to_csv(index=False).encode('utf-8')
+        st.download_button("📥 Stáhnout celou historii (CSV)", csv, "historie_kvality.csv", "text/csv")
+
+# 3. SEKCE: NASTAVENÍ (ŠABLONY)
+elif volba == "Nastavení (Šablony)":
+    st.header("⚙️ Správa referenčních šablon")
+    
+    novy_nazev = st.text_input("Název nového produktu (např. krabice_Bosh):").strip()
+    foto_sablony = st.camera_input("Vyfoťte vzorový (dokonalý) kus jako šablonu")
+    
+    if st.button("Uložit jako novou šablonu"):
+        if novy_nazev == "":
+            st.error("Zadejte prosím název produktu!")
+        elif foto_sablony is None:
+            st.error("Musíte vyfotit vzorový kus!")
+        else:
+            file_bytes = np.asarray(bytearray(foto_sablony.read()), dtype=np.uint8)
+            img_sablona = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+            
+            # Uložení obrázku do složky šablon
+            cesta_sablona = os.path.join(SABLO_DIR, f"sablona_{novy_nazev}.png")
+            cv2.imwrite(cesta_sablona, img_sablona)
+            st.success(f"Šablona pro produkt '{novy_nazev}' byla úspěšně uložena!")
+            st.rerun()
+            
+    # Přehled stávajících šablon s možností smazání
+    st.subheader("Aktuální šablony v systému:")
+    sablony_soubory = [f for f in os.listdir(SABLO_DIR) if f.endswith('.png')]
+    
+    if not sablony_soubory:
+        st.info("Nejsou uloženy žádné šablony.")
+    else:
+        for f in sablony_soubory:
+            prod_name = os.path.splitext(f)[0].replace("sablona_", "")
+            col1, col2 = st.columns([4, 1])
+            col1.write(f"📦 {prod_name}")
+            if col2.button("Smazat", key=f):
+                os.remove(os.path.join(SABLO_DIR, f))
+                st.success(f"Smazáno: {prod_name}")
+                st.rerun()
+
+# Odhlášení na spodu bočního panelu
+st.sidebar.markdown("---")
+if st.sidebar.button("🔓 Odhlásit se"):
+    st.session_state.logged_in = False
+    st.rerun()
